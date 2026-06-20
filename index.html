@@ -134,7 +134,7 @@ input{font-family:var(--font);}
 .thumbs-row{display:flex;gap:8px;padding:10px 16px 0;justify-content:center;max-width:440px;margin:0 auto;width:100%;}
 .thumb-slot{flex:1;max-width:90px;aspect-ratio:3/4;border-radius:10px;background:rgba(255,255,255,.07);border:2px dashed rgba(255,255,255,.18);overflow:hidden;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.25);font-size:18px;transition:border-color .3s;position:relative;}
 .thumb-slot.taken{border-style:solid;border-color:var(--coral);}
-.thumb-slot img{width:100%;height:100%;object-fit:cover;}
+.thumb-slot img{display:block;width:100%;height:100%;object-fit:cover;object-position:center;}
 .thumb-tick{position:absolute;bottom:4px;right:4px;background:var(--coral);color:#fff;font-size:8px;width:16px;height:16px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:900;}
 #cam-msg{text-align:center;font-size:13px;font-weight:700;color:rgba(255,255,255,.55);padding:6px 20px 0;}
 .shutter-area{display:flex;align-items:center;justify-content:center;gap:20px;padding:8px 0 0;width:100%;max-width:440px;margin:0 auto;}
@@ -976,6 +976,7 @@ var FRAME_CATS=[
 /* ══════════ STATE ══════════ */
 var S={
   stream:null,facing:'user',muted:false,
+  cameraResolution:null,
   filter:'original',effect:'none',
   caption:'',captionColor:'#FFFFFF',captionPos:'bottom',
   sticker:'',
@@ -990,6 +991,7 @@ var S={
 };
 var SHOTS=4;
 var CD_SEC=7;
+var PHOTO_ZOOM=1.08;
 
 /* ══════════ HELPERS ══════════ */
 function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
@@ -1002,6 +1004,48 @@ function toast(msg){var t=document.getElementById('toast');t.textContent=msg;t.c
 function setMsg(m){document.getElementById('cam-msg').textContent=m;}
 function getCollage(){return COLLAGE_TYPES.find(function(c){return c.id===S.collage;})||COLLAGE_TYPES[0];}
 function getFrame(){return FRAMES.find(function(f){return f.id===S.frame;})||FRAMES[0];}
+function waitForVideoReady(video){
+  return new Promise(function(resolve){
+    if(video.readyState>=2 && video.videoWidth && video.videoHeight){resolve(); return;}
+    var done=false;
+    function finish(){
+      if(done)return;
+      done=true;
+      video.removeEventListener('loadedmetadata',finish);
+      video.removeEventListener('canplay',finish);
+      resolve();
+    }
+    video.addEventListener('loadedmetadata',finish);
+    video.addEventListener('canplay',finish);
+    setTimeout(finish,1200);
+  });
+}
+function updateCameraResolution(video){
+  var W=video.videoWidth||640,H=video.videoHeight||480;
+  S.cameraResolution={width:W,height:H,aspectRatio:W/H};
+}
+function updateCameraPreviewFrame(){
+  var wrap=document.querySelector('.video-wrap');
+  if(!wrap)return;
+  var ct=getCollage();
+  var slot=ct.slots[0]||{w:3,h:4};
+  wrap.style.aspectRatio=slot.w+'/'+slot.h;
+}
+async function getBestVideoConstraints(){
+  var constraints={video:{facingMode:S.facing,width:{ideal:1920},height:{ideal:1080}},audio:false};
+  if(!navigator.mediaDevices||!navigator.mediaDevices.enumerateDevices)return constraints;
+  try{
+    var devices=await navigator.mediaDevices.enumerateDevices();
+    var device=devices.find(function(d){return d.kind==='videoinput';});
+    if(device && device.getCapabilities){
+      var caps=device.getCapabilities();
+      var maxW=caps.maxWidth||1920,maxH=caps.maxHeight||1080;
+      constraints.video.width={ideal:Math.min(1920,maxW)};
+      constraints.video.height={ideal:Math.min(1080,maxH)};
+    }
+  }catch(e){}
+  return constraints;
+}
 
 /* ══════════ STEP BAR ══════════ */
 var STEPS=['Frame','Camera','Customize','Download'];
@@ -1663,6 +1707,7 @@ function buildLayoutCards(){
       document.querySelectorAll('.layout-card').forEach(function(c){c.classList.remove('selected');});
       card.classList.add('selected');
       document.getElementById('btn-layout-next').disabled=false;
+      updateCameraPreviewFrame();
       toast(ct.label+' selected!');
       initializeLayoutTexts(ct);
     });
@@ -1756,6 +1801,7 @@ function showScreen(id){
 async function goCamera(){
   var ct=getCollage();SHOTS=ct.count;
   buildThumbSlots();
+  updateCameraPreviewFrame();
   resetSession();
   showScreen('step-camera');
   renderStepBar('sb-camera',1);
@@ -1765,8 +1811,12 @@ async function startStream(){
   var video=document.getElementById('webcam');
   try{
     if(S.stream)S.stream.getTracks().forEach(function(t){t.stop();});
-    S.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:S.facing,width:{ideal:1280},height:{ideal:960}},audio:false});
+    var constraints=await getBestVideoConstraints();
+    S.stream=await navigator.mediaDevices.getUserMedia(constraints);
     video.srcObject=S.stream;
+    await waitForVideoReady(video);
+    updateCameraResolution(video);
+    updateCameraPreviewFrame();
     video.style.transform=S.facing==='user'?'scaleX(-1)':'scaleX(1)';
     await video.play();
     setMsg('Tap the button to begin your session!');
@@ -1803,7 +1853,7 @@ async function beginSession(){
   for(var j=0;j<SHOTS;j++){
     document.getElementById('shot-badge').textContent='Photo '+(j+1)+' / '+SHOTS;
     setMsg('Get ready for photo '+(j+1)+'! 😄');
-    await runCountdown();snap(j);
+    await runCountdown();await snap(j);
     if(j<SHOTS-1){setMsg('Great! Next pose coming…');await sleep(900);}
   }
   document.getElementById('shot-badge').style.display='none';
@@ -1816,11 +1866,15 @@ async function runCountdown(){
   var el=document.getElementById('cd-num');
   for(var n=CD_SEC;n>=1;n--){el.textContent=n;el.classList.add('show');await sleep(650);el.classList.remove('show');await sleep(350);}
 }
-function snap(idx){
+async function snap(idx){
   var video=document.getElementById('webcam'),oc=document.getElementById('offscreen');
-  var W=video.videoWidth||640,H=video.videoHeight||480;
+  await waitForVideoReady(video);
+  updateCameraResolution(video);
+  var W=video.videoWidth||S.cameraResolution.width||640,H=video.videoHeight||S.cameraResolution.height||480;
   oc.width=W;oc.height=H;
   var c2=oc.getContext('2d');
+  c2.imageSmoothingEnabled=true;
+  c2.imageSmoothingQuality='high';
   c2.save();if(S.facing==='user'){c2.translate(W,0);c2.scale(-1,1);}
   c2.drawImage(video,0,0,W,H);c2.restore();
   applyCanvasFilter(c2,W,H,S.filter);
@@ -1987,6 +2041,18 @@ async function renderStripToCanvas(canvas, isEditor){
   }
 }
 
+function fitCover(sourceW, sourceH, targetW, targetH){
+  var scale=Math.max(targetW/sourceW,targetH/sourceH)*PHOTO_ZOOM;
+  var sw=targetW/scale, sh=targetH/scale;
+  return {x:(sourceW-sw)/2,y:(sourceH-sh)/2,w:sw,h:sh};
+}
+function drawCover(c2,img,x,y,w,h){
+  c2.imageSmoothingEnabled=true;
+  c2.imageSmoothingQuality='high';
+  var fit=fitCover(img.width,img.height,w,h);
+  c2.drawImage(img,fit.x,fit.y,fit.w,fit.h,x,y,w,h);
+}
+
 function drawPhotoSlot(c2,img,slot,fr,sScale){
   var x=slot.x,y=slot.y,w=slot.w,h=slot.h;
   
@@ -2007,7 +2073,9 @@ function drawPhotoSlot(c2,img,slot,fr,sScale){
   oc.width=w;
   oc.height=h;
   var tc=oc.getContext('2d');
-  tc.drawImage(img,0,0,w,h);
+  tc.imageSmoothingEnabled=true;
+  tc.imageSmoothingQuality='high';
+  drawCover(tc,img,0,0,w,h);
   applyCanvasFilter(tc,w,h,S.filter);
   applyEffect(tc,w,h,S.effect);
   
@@ -2176,6 +2244,7 @@ function init(){
   document.getElementById('btn-print').addEventListener('click',printStrip);
   document.getElementById('btn-new-session').addEventListener('click',function(){
     S.photos=[];S.caption='';S.sticker='';S.filter='original';S.effect='none';S.frame=null;S.collage=null;
+    S.cameraResolution=null;
     S.title='selfie booth';S.location='Phnom Penh';
     S.overlays=[];S.activeOverlayIndex=-1;
     if(S.stream)S.stream.getTracks().forEach(function(t){t.stop();});
